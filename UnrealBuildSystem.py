@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 import os
+from os import path 
 
 ST3 = int(sublime.version()) > 3000
 if ST3:
@@ -42,7 +43,8 @@ def show_quick_panel(options, done):
 class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
     udk_path = ""
     udk_exe_path = ""
-    udkLift_exe_path = ""
+    udk_cmd_path = ""
+    udk_editor_path = ""
     udk_maps_folder = []
     # the building output
     _output = []
@@ -56,6 +58,7 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
 
     b_build_and_run = False
     b_compiled_debug = False
+    environment = "NONE"
 
     compile_settings = []
 
@@ -63,6 +66,50 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
     startup_configurations = []
     # the key of one startup configurations
     last_used_configuration = ""
+
+    def updateEnvironment(self, folders):
+         # search open folders for the Src directory
+        for folder in folders:
+            if folder.endswith("\Development\Src"):
+                self.udk_path = folder[:-15]
+                self.environment = "UE3"
+                break
+            else:
+                [base, dir] = path.split(folder)
+                testPath = path.join(base, "System", "UCC.exe")
+                # when a folder like "TrialGroup" has a non-udk parent such as "UT2004", then check for subfolder "System" 
+                if path.exists(testPath):
+                    self.udk_path = path.join(base, "")
+                    self.environment = "UE1/UE2"
+                    break
+
+        if self.udk_path == "":
+            print("Game path was not found!")
+            return False
+
+        print("environment is " + self.environment)
+
+        relative_udk_cmd_path = ""
+        if self.environment == "UE3":
+            relative_udk_cmd_path = os.path.join("Binaries", "UDKLift.exe")
+        else:
+            relative_udk_cmd_path = os.path.join("System", "UCC.exe")
+            
+        self.udk_cmd_path = os.path.join(self.udk_path, relative_udk_cmd_path)
+        if self.environment == "UE3":
+            self.udk_exe_path = self.udk_cmd_path
+            self.udk_editor_path = self.udk_cmd_path
+        else:
+            # TODO: Make exe name configurable?
+            [base, dir] = path.split(path.normpath(self.udk_path))
+            self.udk_exe_path = os.path.join(self.udk_path, "System", dir + ".exe")
+            self.udk_editor_path = os.path.join(self.udk_path, "System", "UnrealEd.exe")
+
+        if not os.path.exists(self.udk_exe_path):
+            print("The game exe does not exist at " + self.udk_exe_path)
+            return False
+
+        return True
 
     # find src folder and start building
     def run(self, edit, b_build_and_run=False, b_show_compile_options=False):
@@ -80,19 +127,13 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
                 sub_folders = [x[0] for x in os.walk(folder)]
                 all_folders += sub_folders
 
-            # search open folders for the Src directory
-            for folder in all_folders:
-                if folder.endswith("\Development\Src"):
-                    self.udk_exe_path = folder
-                    break
-            if self.udk_exe_path == "":
-                print("Src folder not found!!!")
+            if not self.updateEnvironment(all_folders):
                 return
 
-            # Removing "Development\Src" and adding the UDK.com path (this is probably not how it's done correctly):
-            self.udk_path = self.udk_exe_path[:-15]
-            self.udkLift_exe_path = self.udk_path + "Binaries\\UDKLift.exe"
-            map_folders = self.settings.get('map_folders')
+            if self.environment == "UE1/UE2":
+                map_folders = [path.join(self.udk_path, "Maps")]
+            else:
+                map_folders = self.settings.get('map_folders')
             for f in map_folders:
                 if f[1] != ':':
                     self.udk_maps_folder.append(self.udk_path + f)
@@ -103,15 +144,12 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
             if not b_show_compile_options:
                 compile_settings_key = self.settings.get('current_compile_settings')
                 self.compile_settings = self.settings.get('compiling_configurations')[compile_settings_key]
-                self.udk_exe_path = self.udk_path + "Binaries\\" + self.compile_settings[0]
+                # FIXME: no idea what this is for
+                # self.udk_exe_path = self.udk_path + "Binaries\\" + self.compile_settings[0]
                 self.start_build()
 
             else:
                 self.show_compile_options()
-
-            # self.udk_exe_path = self.udk_exe_path[:-15] + "Binaries\\Win32\\UDK.com"
-            # self.udkLift_exe_path = self.udk_exe_path[:-13] + "UDKLift.exe"
-            # self.udk_maps_folder = self.udk_exe_path[:-22] + "UDKGame\\Content\\Maps"
 
     # starts building your game. This adds a new UDKbuild thread.
     def start_build(self):
@@ -119,7 +157,7 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
             self.save_all_scripts()
 
         self._output = []
-        self._build_thread = UDKbuild(self.udk_exe_path, self)
+        self._build_thread = UDKbuild(self.udk_cmd_path, self)
         self._build_thread.start()
         self.handle_thread()
 
@@ -150,7 +188,8 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
         if index == 0:
             self.compile_settings = self.compile_settings[self.settings.get('current_compile_settings')]
             self.compile_settings[1] += " -full"
-            self.udk_exe_path = self.udk_path + "Binaries\\" + self.compile_settings[0]
+            # FIXME: no idea what this is for
+            # self.udk_exe_path = self.udk_path + "Binaries\\" + self.compile_settings[0]
             self.start_build()
         elif index == -1:
             return
@@ -291,7 +330,7 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
         if index == 0:
             self.launch_game(self.last_used_configuration)
         elif index == 1:
-            subprocess.Popen([self.udkLift_exe_path])
+            subprocess.Popen([self.udk_exe_path])
         elif index == -1:
             pass
         else:
@@ -341,28 +380,31 @@ class UnrealBuildProjectCommand(sublime_plugin.TextCommand):
         self.last_used_configuration = configuration
         self.settings.set('last_used_configuration', self.last_used_configuration)
         sublime.save_settings('UnrealScriptIDE.sublime-settings')
-        exe_path = self.udk_exe_path[:-3] + "exe"
         b_server = False
         for config in startup_configuration:
-            if "SERVER: " == config[:8]:
+            task = config[:8]
+            params = config[8:]
+            if "SERVER: " == task:
                 b_server = True
-                args = " /C \"" + exe_path + "\" server " + self._last_opened_map + config[8:]
+                args = " /C \"" + self.udk_cmd_path + "\" server " + self._last_opened_map + "?ide=1 " + params
                 cmd = "cmd" + args
                 subprocess.Popen(cmd, creationflags=0x08000000)
-                # subprocess.Popen([exe_path, "server " + self._last_opened_map + config[8:]])
-            elif "LISTEN: " == config[:8]:
+                # subprocess.Popen([exe_path, "server " + self._last_opened_map + params])
+            elif "LISTEN: " == task:
                 b_server = True
-                subprocess.Popen([exe_path, self._last_opened_map + "?listen=true" + config[8:]])
-            elif "CLIENT: " == config[:8]:
+                subprocess.Popen([self.udk_exe_path, self._last_opened_map + "?listen=true?ide=1" + " " + params])
+            elif "CLIENT: " == task:
+                args = ""
                 if b_server:
-                    subprocess.Popen([exe_path, "127.0.0.1 " + config[8:]])
+                    args = "127.0.0.1"
                 else:
-                    subprocess.Popen([exe_path, self._last_opened_map + config[8:]])
+                    args = self._last_opened_map
+                subprocess.Popen([self.udk_exe_path, args + "?ide=1 " + params])
             elif "EDITOR: ":
-                args = " /C \"" + exe_path + "\" editor " + self._last_opened_map + config[8:]
+                args = " /C \"" + self.udk_editor_path + "\" editor " + self._last_opened_map + "?ide=1 " + params
                 cmd = "cmd" + args
                 subprocess.Popen(cmd, creationflags=0x08000000)
-                # subprocess.Popen([exe_path, "editor " + self._last_opened_map + config[8:]])
+                # subprocess.Popen([exe_path, "editor " + self._last_opened_map + params])
             else:
                 print("something is wrong in your settings, the startup string should start with either 'SERVER: ', 'LISTEN: ' or 'CLIENT: '")
 
